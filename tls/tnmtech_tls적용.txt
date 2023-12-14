@@ -1,0 +1,16 @@
+TLS 미적용 접속  - ( TLS 연동이 마무리되면 접속을 차단할 예정입니다. )
+
+현재 접속중인 서버 정보
+Host : smarthousing.tnmiot.co.kr
+PORT : 1883
+username : smart
+password : smart1234
+
+
+TLS 적용 접속 정보
+Host : smarthousing.tnmiot.co.kr
+PORT : 8884
+username : smart
+password : smart1234
+TLS : TLSv1.2
+MQTT : Version 3.1
