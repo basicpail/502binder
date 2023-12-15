@@ -1,4 +1,5 @@
 from base import OmniVentBase
+from datetime import datetime
 import json
 import ssl
 import asyncio
@@ -180,6 +181,34 @@ class BindingToPlatform(OmniVentBase):
         async with AirMonitorClient(ST_BASE_URL,ST_API_KEY) as stclient:
             response_get = await stclient.make_authenticated_get_request('states')
             LOGGER.info(f"GET_RESPONSE: {response_get}")
+            current_time = datetime.now()
+            data_dict = {
+                "timestamp" : current_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "temperature" : response_get['main']['temperature']['value'],
+                "humidity" : response_get['main']['humidity']['value'],
+                "pm10" : response_get['main']['dustLevel']['value'],
+                "pm2d5" : response_get['main']['fineDustLevel']['value'],
+                "pm1d0" : response_get['main']['veryFineDustLevel']['value'],
+                "co2" : response_get['main']['carbonDioxide']['value'],
+                "gas" : response_get['main']['odorLevel']['value']                
+            }
+            data = [f'{key}:{str(value)}' for key, value in data_dict.items()]
+            LOGGER.info(f"@@@@@@@@@@@@@@@data: {data}")
+            await client.publish(
+                topic = self._register_pub_topic, 
+                payload = json.dumps(formatting.define_payload(
+                    building_in_complex="B08",   
+                    floor_in_complex="F04",
+                    home_in_complex="H01",
+                    device_id="air_quality_sensor",
+                    device_type="D05",
+                    data_type="0",
+                    install_location="거실",
+                    data_list=data)
+                ), 
+                qos = 0
+            )
+            
         #
 
     async def overv_handler(self,client):

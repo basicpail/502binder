@@ -31,7 +31,6 @@ async def main():
     token = "55c5450b-62c3-40ac-8b44-9882c220bcbd"
 
     async with AirMonitorClient(base_url, token) as client:
-        # GET 요청 예제
         response_get = await client.make_authenticated_get_request('states')
         print('GET Response:', response_get)
 
