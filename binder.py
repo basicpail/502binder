@@ -182,7 +182,7 @@ class BindingToPlatform(OmniVentBase):
             try:
                 #
                 #await self.overv_handler(client=client)
-                if self._isfirst == True or self._interval_cnt == 10:
+                if self._isfirst == True or self._interval_cnt == 2:
                     await self.airquality_api_handler(tnm_client=tnm_client)
                     await self.airmonitor_api_handler(tnm_client=tnm_client)
                     self._interval_cnt = 0
@@ -288,8 +288,15 @@ class BindingToPlatform(OmniVentBase):
                 qos=0
             )
         else:
-            data = [f'{key}:{str(value)}' for key, value in data.items()]
+            current_time = datetime.now()
+            data = {
+                'timestamp' : current_time.strftime("%Y-%m-%d %H:%M:%S"),
+                'power': 'on' if data['pw_status'] == '1' else 'off',
+                'mode': data['av_mode'],
+                'fan_speed': data['fan_speed']
+            }
             LOGGER.info(f"@@@@@@@@@@@@@@@data: {data}")
+            data = [f'{key}:{str(value)}' for key, value in data.items()]
             payload = formatting.define_payload(
                     building_in_complex="B08",
                     floor_in_complex="F04",
