@@ -15,22 +15,25 @@ from logger import LOGGER
 from aiohttp import ClientSession
 from airquality import PubAir
 from smartthings import AirMonitorClient
+from mongodb import MongoDBHandler
 
 class BindingToPlatform(OmniVentBase):
     def __init__(
         self,
-        mqtt_broker_addr,
+        tnm_mqtt_broker_addr,
+        kic_mqtt_broker_addr,
         mqtt_broker_port,
         mqtt_username = None,
         mqtt_password = None
     ):
         super().__init__()
-        self._mqtt_broker_addr = mqtt_broker_addr
+        self._tnm_mqtt_broker_addr = tnm_mqtt_broker_addr
+        self._kic_mqtt_broker_addr = kic_mqtt_broker_addr
         self._mqtt_broker_port = mqtt_broker_port
         self._mqtt_username = mqtt_username
         self._mqtt_password = mqtt_password
         self._register_pub_topic = REGISTER_PUB_TOPIC
-        self._control_sub_topic = REGISTER_PUB_TOPIC#CONTROL_SUB_TOPIC
+        self._control_sub_topic = CONTROL_SUB_TOPIC
         self._response_pub_topic = RESPONSE_PUB_TOPIC
         self._pub_interval = 30
         self._interval_cnt = 0
@@ -38,6 +41,10 @@ class BindingToPlatform(OmniVentBase):
         self._ca_certs = 'tls/ca.crt'
         self._certfile = 'tls/client.crt'
         self._keyfile = 'tls/client.key'
+        self._db_handler = MongoDBHandler(
+            host='localhost',
+            port=27017
+        )
         #
         #
         #
@@ -49,16 +56,22 @@ class BindingToPlatform(OmniVentBase):
                 LOGGER.info(self._data_list)
                 tasks = set()
                 stack.push_async_callback(self.cancel_tasks, tasks)
-                client = Client(
-                        hostname = self._mqtt_broker_addr,
+                tnm_client = Client(
+                        hostname = self._tnm_mqtt_broker_addr,
+                        port = 1883,
                         username = self._mqtt_username,
                         password = self._mqtt_password,
+                        client_id=""
+                        )
+                kic_client = Client(
+                        hostname = self._kic_mqtt_broker_addr,
+                        port = 1888,
                         client_id=""
                         )
                 ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
                 ssl_context.load_cert_chain(self._certfile,self._keyfile)
                 ssl_context.load_verify_locations(cafile=self._ca_certs)
-                client._ssl = ssl_context
+                tnm_client._ssl = ssl_context
                 #
                 #
                 #
@@ -69,27 +82,49 @@ class BindingToPlatform(OmniVentBase):
                 #            'cert_reqs':ssl.CERT_REQUIRED,
                 #            'tis_version':ssl.PROTOCOL_TLS
                 #        })
+######################################################################################
+                await stack.enter_async_context(tnm_client)
 
-                await stack.enter_async_context(client)
 
                 #topic_filter = CONTROL_SUB_TOPIC
                 topic_filter = self._control_sub_topic
                 #manager = client.messages(topic_filter) 
-                manager = client.filtered_messages(topic_filter) 
+                manager = tnm_client.filtered_messages(topic_filter) 
 
                 messages = await stack.enter_async_context(manager)
-                task = asyncio.create_task(self.log_messages(messages))
+                task = asyncio.create_task(self.log_messages(messages,tnm_client,kic_client))
                 tasks.add(task)
 
-                messages = await stack.enter_async_context(client.unfiltered_messages())
+                messages = await stack.enter_async_context(tnm_client.unfiltered_messages())
                 #messages = await stack.enter_async_context(client.messages())
-                task = asyncio.create_task(self.log_messages(messages))
+                task = asyncio.create_task(self.log_messages(messages,tnm_client,kic_client))
                 tasks.add(task)
 
-                task = asyncio.create_task(client.subscribe(self._control_sub_topic))
+                task = asyncio.create_task(tnm_client.subscribe(self._control_sub_topic))
                 tasks.add(task)
 
-                task = asyncio.create_task(self.time_changed_handler(client, interval=self._pub_interval))
+#######################################################################################
+                await stack.enter_async_context(kic_client)
+
+                #topic_filter = CONTROL_SUB_TOPIC
+                topic_filter = 'himpel/#'
+                #manager = client.messages(topic_filter) 
+                manager = kic_client.filtered_messages(topic_filter) 
+
+                messages = await stack.enter_async_context(manager)
+                task = asyncio.create_task(self.log_messages(messages,tnm_client, kic_client))
+                tasks.add(task)
+
+                messages = await stack.enter_async_context(kic_client.unfiltered_messages())
+                #messages = await stack.enter_async_context(client.messages())
+                task = asyncio.create_task(self.log_messages(messages,tnm_client, kic_client))
+                tasks.add(task)
+
+                task = asyncio.create_task(kic_client.subscribe('himpel/#'))
+                tasks.add(task)
+#########################################################################################
+
+                task = asyncio.create_task(self.time_changed_handler(tnm_client, interval=self._pub_interval))
                 tasks.add(task)
 
 
@@ -119,14 +154,21 @@ class BindingToPlatform(OmniVentBase):
                 #    task.cancel()
 
 
-    async def log_messages(self, messages):
+    async def log_messages(self, messages, tnm_client, kic_client):
         async for message in messages:
             try:
+                LOGGER.info(f"log_messages_message: {message.topic}")
                 LOGGER.info(f"log_messages_message: {message.payload}")
                 data = json.loads(message.payload)
-                params = formatting.interpret_control_message(data)
-                for param in params:
-                    self._modbusTcp_write(address = param['address'],value = param['value'])
+
+                if message.topic == "himpel/device/report_info/000C65230FF9":
+                    await self.himpel_handler(kic_client=kic_client, tnm_client=tnm_client, data=data)
+                elif message.topic == CONTROL_SUB_TOPIC and data['device_id'] == 'heat_exchanger':
+                    await self.himpel_handler(kic_client=kic_client, tnm_client=tnm_client, data=data, isControl=True)
+                #######
+                #params = formatting.interpret_control_message(data)
+                #for param in params:
+                #    self._modbusTcp_write(address = param['address'],value = param['value'])
                 #await asyncio.wait_for(self.call_service(message), timeout=1)
             except asyncio.TimeoutError:
                 LOGGER.info(f"time out!!!")
@@ -135,15 +177,14 @@ class BindingToPlatform(OmniVentBase):
 
 
 
-    async def time_changed_handler(self, client, interval):
+    async def time_changed_handler(self, tnm_client, interval):
         while True:
             try:
                 #
-                
                 #await self.overv_handler(client=client)
-                if self._isfirst == True or self._interval_cnt == 1:
-                    await self.airquality_api_handler(client=client)
-                    await self.airmonitor_api_handler(client=client)
+                if self._isfirst == True or self._interval_cnt == 10:
+                    await self.airquality_api_handler(tnm_client=tnm_client)
+                    await self.airmonitor_api_handler(tnm_client=tnm_client)
                     self._interval_cnt = 0
                 self._interval_cnt+=1
                 self._isfirst = False
@@ -152,7 +193,7 @@ class BindingToPlatform(OmniVentBase):
                 LOGGER.info(f"time_changed_handler_error: {e}")
                 await asyncio.sleep(3)
 
-    async def airquality_api_handler(self,client):
+    async def airquality_api_handler(self,tnm_client):
         async with ClientSession() as session:
             pubair = PubAir(API_KEY, "대화동", session)
             await pubair.fetching_data()
@@ -162,9 +203,7 @@ class BindingToPlatform(OmniVentBase):
             data = [f'{key}:{str(value)}' for key, value in data.items()]
             LOGGER.info(f"airquality_data: {data}")
             #
-        await client.publish(
-            topic = self._register_pub_topic, 
-            payload = json.dumps(formatting.define_payload(
+        payload = formatting.define_payload(
                 building_in_complex="B08",   
                 floor_in_complex="F05",
                 home_in_complex="H02",
@@ -172,12 +211,20 @@ class BindingToPlatform(OmniVentBase):
                 device_type="A08",
                 data_type="0",
                 install_location="veranda",
-                data_list=data)
-            ), 
+                data_list=data
+                )
+        await tnm_client.publish(
+            topic = self._register_pub_topic, 
+            payload = json.dumps(payload), 
             qos = 0
         )
+        self._db_handler.insert_data(
+            db_name = 'devices',
+            collection_name='airQuality_out',
+            data_to_insert = payload
+        )
         #
-    async def airmonitor_api_handler(self,client):
+    async def airmonitor_api_handler(self,tnm_client):
         async with AirMonitorClient(ST_BASE_URL,ST_API_KEY) as stclient:
             response_get = await stclient.make_authenticated_get_request('states')
             LOGGER.info(f"GET_RESPONSE: {response_get}")
@@ -194,9 +241,7 @@ class BindingToPlatform(OmniVentBase):
             }
             data = [f'{key}:{str(value)}' for key, value in data_dict.items()]
             LOGGER.info(f"@@@@@@@@@@@@@@@data: {data}")
-            await client.publish(
-                topic = self._register_pub_topic, 
-                payload = json.dumps(formatting.define_payload(
+            payload = formatting.define_payload(
                     building_in_complex="B08",   
                     floor_in_complex="F04",
                     home_in_complex="H01",
@@ -204,29 +249,90 @@ class BindingToPlatform(OmniVentBase):
                     device_type="D05",
                     data_type="0",
                     install_location="거실",
-                    data_list=data)
-                ), 
+                    data_list=data
+                    )
+            await tnm_client.publish(
+                topic = self._register_pub_topic, 
+                payload = json.dumps(payload), 
                 qos = 0
             )
+            self._db_handler.insert_data(
+                db_name= 'devices',
+                collection_name='airQuality_in_401',
+                data_to_insert = payload
+            )
             
-        #
+    async def himpel_handler(self, tnm_client=None, kic_client=None, data=None, isControl=None):
+        if isControl:
+            received_data = data
+            received_data['msg_err_code'] = "1" #response
+            data = data['parameter'][0]
+            control_format = {"command":"","data":""}
+            if data['parameter_name'] == 'control_type':
+                control_format['command'] = "ctl_pw"
+                control_format['data'] = "1" if data['parameter_value'] == "turn_on" else "0"
+            elif data['parameter_name'] == "select_option_mode":
+                control_format['command'] = 'ctl_mode'
+                control_format['data'] = data['parameter_value'] #1:bypass
+            elif data['parameter_name'] == "select_option_fanspeed":
+                control_format['command'] = 'ctl_fan_speed'
+                control_format['data'] = data['parameter_value']
+            await kic_client.publish(
+                topic="himpel/server/command/000C65230FF9",
+                payload= json.dumps(control_format),
+                qos=0
+            )
+            await tnm_client.publish(
+                topic=RESPONSE_PUB_TOPIC,
+                payload = json.dumps(received_data),
+                qos=0
+            )
+        else:
+            data = [f'{key}:{str(value)}' for key, value in data.items()]
+            LOGGER.info(f"@@@@@@@@@@@@@@@data: {data}")
+            payload = formatting.define_payload(
+                    building_in_complex="B08",
+                    floor_in_complex="F04",
+                    home_in_complex="H01",
+                    device_id="heat_exchanger",
+                    device_type="O01",
+                    data_type="0",
+                    install_location="입구",
+                    data_list=data
+                    )
+            await tnm_client.publish(
+                topic = self._register_pub_topic, 
+                payload = json.dumps(payload), 
+                qos = 0
+            )
+            self._db_handler.insert_data(
+                db_name='devices',
+                collection_name='heat_exchanger_401',
+                data_to_insert = payload
+            )
 
-    async def overv_handler(self,client):
+    async def overv_handler(self,tnm_client):
         self._modbusTcp_read()
         self._modbusUdp_read()
         LOGGER.info(f"self._data_list: {self._data_list}")
-        await client.publish(
-            topic = self._register_pub_topic, 
-            payload = json.dumps(formatting.define_payload(
+        payload = formatting.define_payload(
                 device_id="overv_controller_502",
                 device_type="D06",
                 data_type="0",
                 install_location="veranda",
-                data_list=self._data_list)
-            ), 
+                data_list=self._data_list
+                )
+        await tnm_client.publish(
+            topic = self._register_pub_topic, 
+            payload = json.dumps(payload), 
             qos = 0
         )
-        await client.publish(
+        self._db_handler.insert_data(
+            db_name='devices',
+            collection_name='overv_controller_502',
+            data_to_insert = payload
+        )
+        await tnm_client.publish(
             topic = self._register_pub_topic, 
             payload = json.dumps(formatting.define_payload(
                 device_id="overv_diffuser_502",
@@ -237,7 +343,7 @@ class BindingToPlatform(OmniVentBase):
             ), 
             qos = 0
         )
-        await client.publish(
+        await tnm_client.publish(
             topic = self._register_pub_topic, 
             payload = json.dumps(formatting.define_payload(
                 device_id="overv_diffuser_502",
@@ -248,7 +354,7 @@ class BindingToPlatform(OmniVentBase):
             ), 
             qos = 0
         )
-        await client.publish(
+        await tnm_client.publish(
             topic = self._register_pub_topic, 
             payload = json.dumps(formatting.define_payload(
                 device_id="overv_diffuser_502",
@@ -259,7 +365,7 @@ class BindingToPlatform(OmniVentBase):
             ), 
             qos = 0
         )
-        await client.publish(
+        await tnm_client.publish(
             topic = self._register_pub_topic, 
             payload = json.dumps(formatting.define_payload(
                 device_id="overv_diffuser_502",
@@ -270,7 +376,7 @@ class BindingToPlatform(OmniVentBase):
             ), 
             qos = 0
         )
-        await client.publish(
+        await tnm_client.publish(
             topic = self._register_pub_topic, 
             payload = json.dumps(formatting.define_payload(
                 device_id="overv_diffuser_502",
@@ -308,6 +414,7 @@ class BindingToPlatform(OmniVentBase):
 if __name__ == '__main__':
     a = BindingToPlatform(
         'smarthousing.tnmiot.co.kr',
+        'kictechdatahub.duckdns.org',
         8884,
         'smart',
         'smart1234'
